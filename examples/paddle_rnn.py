@@ -13,6 +13,7 @@ import random
 
 import numpy as np
 import paddle
+import paddle.nn.functional as F
 import paddlenlp as ppnlp
 from paddlenlp.data import JiebaTokenizer, Pad, Stack, Tuple, Vocab
 from paddlenlp.datasets import load_dataset
@@ -30,6 +31,8 @@ parser.add_argument("--batch_size", type=int, default=64, help="Total examples' 
 parser.add_argument('--network', choices=['bow', 'lstm', 'bilstm', 'gru', 'bigru', 'rnn', 'birnn', 'bilstm_attn', 'cnn'],
     default="bilstm", help="Select which network to train, defaults to bilstm.")
 parser.add_argument("--init_from_ckpt", type=str, default=None, help="The path of checkpoint to be loaded.")
+parser.add_argument("--params_path", type=str, default='./checkpoints/final.pdparams', help="The path of model parameter to be loaded.")
+
 args = parser.parse_args()
 # yapf: enable
 
@@ -128,22 +131,27 @@ def read_dev(data_path):
 
             yield example
 
-def train(vocab_path, train_path, dev_path):
-    """训练模型"""
-    # Load vocab
-    vocab = Vocab.load_vocabulary(
-        vocab_path, unk_token='[UNK]', pad_token='[PAD]')
-    # Loads dataset.
-    # train_ds, dev_ds = load_dataset("chnsenticorp", splits=["train", "dev"])
-    train_ds = load_dataset(read_train, data_path=train_path, lazy=False)
-    dev_ds = load_dataset(read_dev, data_path=dev_path, lazy=False)
-    for example in train_ds[0:2]:
-        print(example)
+def preprocess_prediction_data(data, tokenizer):
+    """
+    It process the prediction data as the format used as training.
 
-    vocab_size = len(vocab)
-    num_classes = len(label_list)
-    pad_token_id = vocab.to_indices('[PAD]')
+    Args:
+        data (obj:`List[str]`): The prediction data whose each element is  a tokenized text.
+        tokenizer(obj: paddlenlp.data.JiebaTokenizer): It use jieba to cut the chinese string.
 
+    Returns:
+        examples (obj:`List(Example)`): The processed data whose each element is a Example (numedtuple) object.
+            A Example object contains `text`(word_ids) and `seq_len`(sequence length).
+
+    """
+    examples = []
+    for text in data:
+        ids = tokenizer.encode(text)
+        examples.append([ids, len(ids)])
+    return examples
+
+def bulid_model(vocab_size, num_classes, pad_token_id):
+    """"""
     # Constructs the network.
     network = args.network.lower()
     if network == 'bow':
@@ -204,6 +212,26 @@ def train(vocab_path, train_path, dev_path):
             % network)
     model = paddle.Model(model)
 
+    return model
+
+def train(vocab_path, train_path, dev_path):
+    """训练模型"""
+    # Load vocab
+    vocab = Vocab.load_vocabulary(
+        vocab_path, unk_token='[UNK]', pad_token='[PAD]')
+    # Loads dataset.
+    # train_ds, dev_ds = load_dataset("chnsenticorp", splits=["train", "dev"])
+    train_ds = load_dataset(read_train, data_path=train_path, lazy=False)
+    dev_ds = load_dataset(read_dev, data_path=dev_path, lazy=False)
+    for example in train_ds[0:2]:
+        print(example)
+
+    vocab_size = len(vocab)
+    num_classes = len(label_list)
+    pad_token_id = vocab.to_indices('[PAD]')
+
+    model = bulid_model(vocab_size, num_classes, pad_token_id)
+
     # Reads data and generates mini-batches.
     tokenizer = JiebaTokenizer(vocab)
     trans_fn = partial(convert_example, tokenizer=tokenizer, is_test=False)
@@ -240,12 +268,121 @@ def train(vocab_path, train_path, dev_path):
         print("Loaded checkpoint from %s" % args.init_from_ckpt)
 
     # Starts training and evaluating.
-    callback = paddle.callbacks.ProgBarLogger(log_freq=10, verbose=3 )
+    callback = paddle.callbacks.ProgBarLogger(log_freq=20, verbose=3)
     model.fit(train_loader,
               dev_loader,
               epochs=args.epochs,
               save_dir=args.save_dir,
+              save_freq=5,
               callbacks=callback)
+
+def predict(vocab_path, label_list, batch_size=1, pad_token_id=0):
+    """预测"""
+    # Load vocab
+    vocab = Vocab.load_vocabulary(
+        vocab_path, unk_token='[UNK]', pad_token='[PAD]')
+    # Loads dataset.
+    label_map = {0: 'negative', 1: 'positive'}
+
+    vocab_size = len(vocab)
+    num_classes = len(label_list)
+    pad_token_id = vocab.to_indices('[PAD]')
+
+    network = args.network.lower()
+    if network == 'bow':
+        model = BoWModel(vocab_size, num_classes, padding_idx=pad_token_id)
+    elif network == 'bigru':
+        model = GRUModel(
+            vocab_size,
+            num_classes,
+            direction='bidirect',
+            padding_idx=pad_token_id)
+    elif network == 'bilstm':
+        model = LSTMModel(
+            vocab_size,
+            num_classes,
+            direction='bidirect',
+            padding_idx=pad_token_id)
+    elif network == 'bilstm_attn':
+        lstm_hidden_size = 196
+        attention = SelfInteractiveAttention(hidden_size=2 * lstm_hidden_size)
+        model = BiLSTMAttentionModel(
+            attention_layer=attention,
+            vocab_size=vocab_size,
+            lstm_hidden_size=lstm_hidden_size,
+            num_classes=num_classes,
+            padding_idx=pad_token_id)
+    elif network == 'birnn':
+        model = RNNModel(
+            vocab_size,
+            num_classes,
+            direction='bidirect',
+            padding_idx=pad_token_id)
+    elif network == 'cnn':
+        model = CNNModel(vocab_size, num_classes, padding_idx=pad_token_id)
+    elif network == 'gru':
+        model = GRUModel(
+            vocab_size,
+            num_classes,
+            direction='forward',
+            padding_idx=pad_token_id,
+            pooling_type='max')
+    elif network == 'lstm':
+        model = LSTMModel(
+            vocab_size,
+            num_classes,
+            direction='forward',
+            padding_idx=pad_token_id,
+            pooling_type='max')
+    elif network == 'rnn':
+        model = RNNModel(
+            vocab_size,
+            num_classes,
+            direction='forward',
+            padding_idx=pad_token_id,
+            pooling_type='max')
+    else:
+        raise ValueError(
+            "Unknown network: %s, it must be one of bow, lstm, bilstm, cnn, gru, bigru, rnn, birnn and bilstm_attn."
+            % network)
+
+    # Loads model parameters.
+    state_dict = paddle.load(args.params_path)
+    model.set_dict(state_dict)
+    print("Loaded parameters from %s" % args.params_path)
+
+    # Firstly pre-processing prediction data  and then do predict.
+    data = [
+        '这个宾馆比较陈旧了，特价的房间也很一般。总体来说一般',
+        '怀着十分激动的心情放映，可是看着看着发现，在放映完毕后，出现一集米老鼠的动画片',
+        '作为老的四星酒店，房间依然很整洁，相当不错。机场接机服务很好，可以在车上办理入住手续，节省时间。',
+    ]
+    tokenizer = JiebaTokenizer(vocab)
+    data = preprocess_prediction_data(data, tokenizer)
+
+    # Seperates data into some batches.
+    batches = [
+        data[idx:idx + batch_size] for idx in range(0, len(data), batch_size)
+    ]
+    batchify_fn = lambda samples, fn=Tuple(
+        Pad(axis=0, pad_val=pad_token_id),  # input_ids
+        Stack(dtype="int64"),  # seq len
+    ): [data for data in fn(samples)]
+
+    results = []
+    model.eval()
+    for batch in batches:
+        texts, seq_lens = batchify_fn(batch)
+        texts = paddle.to_tensor(texts)
+        seq_lens = paddle.to_tensor(seq_lens)
+        logits = model(texts, seq_lens)
+        probs = F.softmax(logits, axis=1)
+        idx = paddle.argmax(probs, axis=1).numpy()
+        idx = idx.tolist()
+        labels = [label_map[i] for i in idx]
+        results.extend(labels)
+    print(results)
+    # return results
 
 
 if __name__ == "__main__":
@@ -256,7 +393,8 @@ if __name__ == "__main__":
     dev_path = "/home/mesie/python/data/nlp/ChnSentiCorp/dev.tsv"
     test_path = "/home/mesie/python/data/nlp/ChnSentiCorp/test.tsv"
     vocab_path = '/home/mesie/python/data/nlp/senta_word_dict.txt'
-    train(vocab_path, train_path, dev_path)
+    # train(vocab_path, train_path, dev_path)
+    predict(vocab_path, label_list)
 
 
 
