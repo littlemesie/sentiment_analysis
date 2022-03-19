@@ -8,16 +8,17 @@
 """
 import torch
 import jieba
+import random
 import argparse
 from codecs import open
 import torch.nn as nn
-import torch.nn.functional as F
+from sklearn import metrics
 from models.pytorch_rnn import RNNModel, LSTMModel, GRUModel, BiLSTMModel
 
 parser = argparse.ArgumentParser(__doc__)
-parser.add_argument("--epochs", type=int, default=10, help="Number of epoches for training.")
+parser.add_argument("--epochs", type=int, default=30, help="Number of epoches for training.")
 parser.add_argument('--device', choices=['cpu', 'gpu', 'xpu'], default="cpu", help="Select which device to train model, defaults to gpu.")
-parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate used to train.")
+parser.add_argument("--lr", type=float, default=4e-5, help="Learning rate used to train.")
 parser.add_argument("--save_dir", type=str, default='checkpoints/', help="Directory to save model checkpoint")
 parser.add_argument("--batch_size", type=int, default=64, help="Total examples' number of a batch for training.")
 parser.add_argument("--max_len", type=int, default=128, help="The text length")
@@ -53,6 +54,17 @@ def sort_by_lengths(corpus_lists, label_lists, lengths_list):
     lengths_list_ = [lengths_list[ind] for ind in indices]
 
     return corpus_lists_, label_lists_, lengths_list_
+
+def sample_data(corpus_lists, label_lists):
+    """打乱数据"""
+    pairs = list(zip(range(len(label_lists)), label_lists))
+    random.shuffle(pairs)
+    indices = [pair[0] for pair in pairs]
+
+    corpus_lists_ = [corpus_lists[ind] for ind in indices]
+    label_lists_ = [pair[1] for pair in pairs]
+
+    return corpus_lists_, label_lists_
 
 def read_data(vocab2id, max_len, path="", flag='train'):
     """读取数据"""
@@ -115,11 +127,14 @@ def bulid_model(vocab_size, num_classes):
 
 def validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_list):
     """validate"""
-    _best_val_loss = None
+    _best_val_loss = 0.4
+    _best_val_acc = 0.87
+    flag = False
     B = args.batch_size
     with torch.no_grad():
         val_losses = 0.
         val_step = 0
+        val_accs = 0
         for ind in range(0, len(dev_corpus_lists), args.epochs+1):
             val_step += 1
             # 准备batch数据
@@ -133,16 +148,20 @@ def validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_li
 
             # forward
             scores = model(batch_sents)
-
+            predic = torch.max(scores.data, 1)[1].cpu()
+            acc = metrics.accuracy_score(batch_labels.data.cpu(), predic)
             # 计算损失
             loss = loss_func(scores, batch_labels)
             val_losses += loss
+            val_accs += acc
         val_loss = val_losses / val_step
+        val_acc = val_accs / val_step
+        if val_loss < _best_val_loss or val_acc > _best_val_acc:
+            save_path = f"{args.save_dir}{args.network}.ckpt"
+            torch.save(model.state_dict(), save_path)
+            flag = True
 
-        # if val_loss < _best_val_loss:
-        #     print("保存模型...")
-
-        return val_loss
+        return val_loss, val_acc, flag
 
 #
 def train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
@@ -158,6 +177,7 @@ def train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_
     for e in range(1, args.epochs+1):
         step = 0
         losses = 0.
+        # train_corpus_lists, train_label_lists = sample_data(train_corpus_lists, train_label_lists)
         for ind in range(0, len(train_corpus_lists), B):
             step += 1
             batch_sents = train_corpus_lists[ind:ind+B]
@@ -170,6 +190,9 @@ def train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_
 
             # forward
             scores = model(batch_sents)
+            predic = torch.max(scores.data, 1)[1].cpu()
+            train_acc = metrics.accuracy_score(batch_labels.data.cpu(), predic)
+
             model.zero_grad()
 
             loss = loss_func(scores, batch_labels).to(device)
@@ -180,16 +203,18 @@ def train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_
 
             if step % print_step == 0:
                 total_step = (len(train_corpus_lists) // B + 1)
-                print("Epoch {}, step/total_step: {}/{} Loss:{:.4f}".format(
-                    e, step, total_step,  losses / step))
+                print("Epoch {}, step/total_step: {}/{} Acc:{:.4f} Loss:{:.4f}".format(
+                    e, step, total_step,  train_acc, losses / step))
 
         # 每轮结束测试在验证集上的性能，保存最好的一个
-        val_loss = validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_list)
-        print("Epoch {}, Val Loss:{:.4f}".format(e, val_loss))
+        val_loss, val_acc, flag = validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_list)
+        print("Epoch {}, Val Acc:{:.4f}, Val Loss:{:.4f}".format(e, val_acc, val_loss))
+        if flag:
+            break
 
-    # 保存模型
-    save_path = f"{args.save_dir}{args.network}.ckpt"
-    torch.save(model.state_dict(), save_path)
+    # # 保存模型
+    # save_path = f"{args.save_dir}{args.network}.ckpt"
+    # torch.save(model.state_dict(), save_path)
 
 def predict(vocab_size, num_classes, vocab2id):
     """模型预测"""
@@ -198,7 +223,9 @@ def predict(vocab_size, num_classes, vocab2id):
     model.load_state_dict(torch.load(save_path))
     model.eval()
     texts = [
-        '这个宾馆比较陈旧了，特价的房间也很一般。总体来说一般'
+        '这个宾馆比较陈旧了，特价的房间也很一般。总体来说一般',
+        '东西不错，不过有人不太喜欢镜面的，我个人比较喜欢，总之还算满意。',
+        '位置不很方便，周围乱哄哄的，卫生条件也不如其他如家的店。以后绝不会再住在这里。'
     ]
     max_len = args.max_len
     corpus_lists = read_test_data(texts, vocab2id, max_len)
@@ -216,13 +243,13 @@ if __name__ == '__main__':
     label_list = ["0", "1"]
 
     vocab_lists, vocab2id = build_vocab(vocab_path=vocab_path)
-    # train_corpus_lists, train_label_lists, train_lengths_list = read_data(vocab2id, max_len=args.max_len, path=train_path)
-    # dev_corpus_lists, dev_label_lists, dev_lengths_list = read_data(vocab2id, max_len=args.max_len, path=dev_path, flag='dev')
+    train_corpus_lists, train_label_lists, train_lengths_list = read_data(vocab2id, max_len=args.max_len, path=train_path)
+    dev_corpus_lists, dev_label_lists, dev_lengths_list = read_data(vocab2id, max_len=args.max_len, path=dev_path, flag='dev')
 
     vocab_size = len(vocab_lists)
     num_classes = len(label_list)
 
-    # train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
-    #       dev_corpus_lists, dev_label_lists, dev_lengths_list)
-    predict(vocab_size, num_classes, vocab2id)
+    train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
+          dev_corpus_lists, dev_label_lists, dev_lengths_list)
+    # predict(vocab_size, num_classes, vocab2id)
     # print(torch.Tensor(label_lists))
