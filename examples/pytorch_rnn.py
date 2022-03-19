@@ -180,12 +180,8 @@ def train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_
 
             if step % print_step == 0:
                 total_step = (len(train_corpus_lists) // B + 1)
-                print("Epoch {}, step/total_step: {}/{} {:.2f}% Loss:{:.4f}".format(
-                    e, step,
-                    total_step,
-                    10. * step / total_step,
-                    losses / step
-                ))
+                print("Epoch {}, step/total_step: {}/{} Loss:{:.4f}".format(
+                    e, step, total_step,  losses / step))
 
         # 每轮结束测试在验证集上的性能，保存最好的一个
         val_loss = validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_list)
@@ -200,17 +196,15 @@ def predict(vocab_size, num_classes, vocab2id):
     model = bulid_model(vocab_size, num_classes)
     save_path = f"{args.save_dir}{args.network}.ckpt"
     model.load_state_dict(torch.load(save_path))
+    model.eval()
     texts = [
-        '这个宾馆比较陈旧了，特价的房间也很一般。总体来说一般',
-        '怀着十分激动的心情放映，可是看着看着发现，在放映完毕后，出现一集米老鼠的动画片！开始还怀疑是不是赠送的个别现象，可是后来发现每张DVD后面都有！'
-        '真不知道生产商怎么想的，我想看的是猫和老鼠，不是米老鼠！如果厂家是想赠送的话，那就全套米老鼠和唐老鸭都赠送，只在每张DVD后面添加一集算什么？？'
-        '简直是画蛇添足！！',
-        '交通方便；环境很好；服务态度很好 房间较小'
+        '这个宾馆比较陈旧了，特价的房间也很一般。总体来说一般'
     ]
     max_len = args.max_len
     corpus_lists = read_test_data(texts, vocab2id, max_len)
     batch_sents = torch.tensor(corpus_lists, dtype=torch.int64)
     scores = model(batch_sents)
+    print(scores.data)
     predic = torch.max(scores.data, 1)[1].numpy()
     print(predic)
 
@@ -222,13 +216,13 @@ if __name__ == '__main__':
     label_list = ["0", "1"]
 
     vocab_lists, vocab2id = build_vocab(vocab_path=vocab_path)
-    train_corpus_lists, train_label_lists, train_lengths_list = read_data(vocab2id, max_len=args.max_len, path=train_path)
-    dev_corpus_lists, dev_label_lists, dev_lengths_list = read_data(vocab2id, max_len=args.max_len, path=dev_path, flag='dev')
+    # train_corpus_lists, train_label_lists, train_lengths_list = read_data(vocab2id, max_len=args.max_len, path=train_path)
+    # dev_corpus_lists, dev_label_lists, dev_lengths_list = read_data(vocab2id, max_len=args.max_len, path=dev_path, flag='dev')
 
     vocab_size = len(vocab_lists)
     num_classes = len(label_list)
 
-    train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
-          dev_corpus_lists, dev_label_lists, dev_lengths_list)
-    # predict(vocab_size, num_classes, vocab2id)
+    # train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
+    #       dev_corpus_lists, dev_label_lists, dev_lengths_list)
+    predict(vocab_size, num_classes, vocab2id)
     # print(torch.Tensor(label_lists))
