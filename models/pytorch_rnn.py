@@ -25,17 +25,16 @@ class RNNModel(nn.Module):
 
         self.lin = nn.Linear(2*hidden_size, num_classes)
 
-    def forward(self, text, seq_len):
+    def forward(self, text):
         emb = self.embedding(text)  # [B, L, emb_size]
 
-        packed = pack_padded_sequence(emb, seq_len, batch_first=True)
-        rnn_out, _ = self.rnn(packed)
+        rnn_out, _ = self.rnn(emb)
         # rnn_out:[B, L, hidden_size*2]
-        rnn_out, _ = pad_packed_sequence(rnn_out, batch_first=True)
+        rnn_out = rnn_out[:, -1, :]
 
-        logits = self.lin(rnn_out)  # [B, L, out_size]
+        out = self.lin(rnn_out)  # [B, out_size]
 
-        return logits
+        return out
 
 class LSTMModel(nn.Module):
     def __init__(self, vocab_size, num_classes, emb_size=128, hidden_size=128):
@@ -53,17 +52,15 @@ class LSTMModel(nn.Module):
 
         self.lin = nn.Linear(2*hidden_size, num_classes)
 
-    def forward(self, text, seq_len):
+    def forward(self, text):
         emb = self.embedding(text)  # [B, L, emb_size]
-
-        packed = pack_padded_sequence(emb, seq_len, batch_first=True)
-        rnn_out, _ = self.lstm(packed)
+        rnn_out, _ = self.lstm(emb)
         # rnn_out:[B, L, hidden_size*2]
-        rnn_out, _ = pad_packed_sequence(rnn_out, batch_first=True)
+        rnn_out = rnn_out[:, -1, :]
 
-        logits = self.lin(rnn_out)  # [B, L, out_size]
+        out = self.lin(rnn_out)  # [B, out_size]
 
-        return logits
+        return out
 
 class GRUModel(nn.Module):
     def __init__(self, vocab_size, num_classes, emb_size=128, hidden_size=128):
@@ -79,17 +76,16 @@ class GRUModel(nn.Module):
 
         self.lin = nn.Linear(2*hidden_size, num_classes)
 
-    def forward(self, text, seq_len):
+    def forward(self, text):
         emb = self.embedding(text)  # [B, L, emb_size]
 
-        packed = pack_padded_sequence(emb, seq_len, batch_first=True)
-        rnn_out, _ = self.gru(packed)
+        rnn_out, _ = self.gru(emb)
         # rnn_out:[B, L, hidden_size*2]
-        rnn_out, _ = pad_packed_sequence(rnn_out, batch_first=True)
+        rnn_out = rnn_out[:, -1, :]
 
-        logits = self.lin(rnn_out)  # [B, L, out_size]
+        out = self.lin(rnn_out)  # [B, out_size]
 
-        return logits
+        return out
 
 class BiLSTMModel(nn.Module):
     def __init__(self, vocab_size, num_classes, emb_size=128, hidden_size=128):
@@ -107,14 +103,12 @@ class BiLSTMModel(nn.Module):
 
         self.lin = nn.Linear(2*hidden_size, num_classes)
 
-    def forward(self, text, seq_len):
+    def forward(self, text):
         emb = self.embedding(text)  # [B, L, emb_size]
 
-        packed = pack_padded_sequence(emb, seq_len, batch_first=True)
-        rnn_out, _ = self.bilstm(packed)
+        rnn_out, _ = self.bilstm(emb)
         # rnn_out:[B, L, hidden_size*2]
-        rnn_out, _ = pad_packed_sequence(rnn_out, batch_first=True)
+        rnn_out = rnn_out[:, -1, :]
+        out = self.lin(rnn_out)  # [B, out_size]
 
-        logits = self.lin(rnn_out)  # [B, L, out_size]
-
-        return logits
+        return out

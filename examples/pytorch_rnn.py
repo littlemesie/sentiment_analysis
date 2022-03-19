@@ -11,6 +11,7 @@ import jieba
 import argparse
 from codecs import open
 import torch.nn as nn
+import torch.nn.functional as F
 from models.pytorch_rnn import RNNModel, LSTMModel, GRUModel, BiLSTMModel
 
 parser = argparse.ArgumentParser(__doc__)
@@ -18,7 +19,7 @@ parser.add_argument("--epochs", type=int, default=10, help="Number of epoches fo
 parser.add_argument('--device', choices=['cpu', 'gpu', 'xpu'], default="cpu", help="Select which device to train model, defaults to gpu.")
 parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate used to train.")
 parser.add_argument("--save_dir", type=str, default='checkpoints/', help="Directory to save model checkpoint")
-parser.add_argument("--batch_size", type=int, default=128, help="Total examples' number of a batch for training.")
+parser.add_argument("--batch_size", type=int, default=64, help="Total examples' number of a batch for training.")
 parser.add_argument("--max_len", type=int, default=128, help="The text length")
 parser.add_argument('--network', choices=['lstm', 'bilstm', 'gru', 'rnn'],
     default="bilstm", help="Select which network to train, defaults to bilstm.")
@@ -46,8 +47,7 @@ def build_vocab(make_vocab=True, vocab_path=""):
 
 def sort_by_lengths(corpus_lists, label_lists, lengths_list):
     pairs = list(zip(range(len(lengths_list)), lengths_list))
-    indices = sorted(range(len(pairs)), key=lambda k: pairs[k][0],  reverse=True)
-
+    indices = [ind[0] for ind in sorted(pairs, key=lambda k: k[1],  reverse=True)]
     corpus_lists_ = [corpus_lists[ind] for ind in indices]
     label_lists_ = [label_lists[ind] for ind in indices]
     lengths_list_ = [lengths_list[ind] for ind in indices]
@@ -84,6 +84,19 @@ def read_data(vocab2id, max_len, path="", flag='train'):
 
     return corpus_lists, label_lists, lengths_list
 
+def read_test_data(texts, vocab2id, max_len):
+    """测试数据"""
+    corpus_lists = []
+    for text in texts:
+        text_list = [vocab2id.get(vocab, 0) for vocab in jieba.cut(text)]
+        if len(text_list) < max_len:
+            text_list = text_list + [vocab2id['[PAD]'] for i in range(max_len - len(text_list))]
+
+        corpus_lists.append(text_list[:max_len])
+
+    return corpus_lists
+
+
 def bulid_model(vocab_size, num_classes):
     """"""
     # Constructs the network.
@@ -95,7 +108,7 @@ def bulid_model(vocab_size, num_classes):
     elif network == 'gru':
         model = GRUModel(vocab_size, num_classes)
     elif network == 'bilstm':
-        model = LSTMModel(vocab_size, num_classes)
+        model = BiLSTMModel(vocab_size, num_classes)
     else:
         raise ValueError("Unknown network: %s, it must be one of lstm, bilstm, gru, rnn" % network)
     return model
@@ -110,16 +123,16 @@ def validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_li
         for ind in range(0, len(dev_corpus_lists), args.epochs+1):
             val_step += 1
             # 准备batch数据
-            batch_sents = train_corpus_lists[ind:ind + B]
-            batch_labels = train_label_lists[ind:ind + B]
-            batch_lengths = train_lengths_list[ind:ind + B]
-            batch_sents, batch_labels, batch_lengths = sort_by_lengths(batch_sents, batch_labels, batch_lengths)
+            batch_sents = dev_corpus_lists[ind:ind + B]
+            batch_labels = dev_label_lists[ind:ind + B]
+            batch_lengths = dev_lengths_list[ind:ind + B]
+            # batch_sents, batch_labels, batch_lengths = sort_by_lengths(batch_sents, batch_labels, batch_lengths)
 
             batch_sents = torch.tensor(batch_sents, dtype=torch.int64)
             batch_labels = torch.tensor(batch_labels, dtype=torch.int64)
 
             # forward
-            scores = model(batch_sents, batch_lengths)
+            scores = model(batch_sents)
 
             # 计算损失
             loss = loss_func(scores, batch_labels)
@@ -135,51 +148,72 @@ def validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_li
 def train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
           dev_corpus_lists, dev_label_lists, dev_lengths_list):
     model = bulid_model(vocab_size, num_classes)
+    model.train()
     # 初始化优化器
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_func = nn.CrossEntropyLoss()
     # 初始化其他指标
-    print_step = 100
+    print_step = 10
     B = args.batch_size
     for e in range(1, args.epochs+1):
         step = 0
         losses = 0.
         for ind in range(0, len(train_corpus_lists), B):
-
+            step += 1
             batch_sents = train_corpus_lists[ind:ind+B]
             batch_labels = train_label_lists[ind:ind+B]
             batch_lengths = train_lengths_list[ind:ind + B]
-            batch_sents, batch_labels, batch_lengths = sort_by_lengths(batch_sents, batch_labels, batch_lengths)
+            # batch_sents, batch_labels, batch_lengths = sort_by_lengths(batch_sents, batch_labels, batch_lengths)
 
-            batch_sents = torch.tensor(batch_sents, dtype=torch.int64)
-            batch_labels = torch.tensor(batch_labels, dtype=torch.int64)
-            print(batch_sents)
-            print(batch_sents.shape)
+            batch_sents = torch.tensor(batch_sents, dtype=torch.int64).to(device)
+            batch_labels = torch.tensor(batch_labels, dtype=torch.int64).to(device)
 
             # forward
-            scores = model(batch_sents, batch_lengths)
-            optimizer.zero_grad()
+            scores = model(batch_sents)
+            model.zero_grad()
 
-            loss = loss_func(scores, batch_labels)
+            loss = loss_func(scores, batch_labels).to(device)
             losses += loss
 
             loss.backward()
             optimizer.step()
-            step += 1
 
             if step % print_step == 0:
                 total_step = (len(train_corpus_lists) // B + 1)
                 print("Epoch {}, step/total_step: {}/{} {:.2f}% Loss:{:.4f}".format(
-                    e, step, total_step,
-                    100. * step / total_step,
-                    losses / print_step
+                    e, step,
+                    total_step,
+                    10. * step / total_step,
+                    losses / step
                 ))
-                losses = 0.
 
         # 每轮结束测试在验证集上的性能，保存最好的一个
-
         val_loss = validate(model, loss_func, dev_corpus_lists, dev_label_lists, dev_lengths_list)
         print("Epoch {}, Val Loss:{:.4f}".format(e, val_loss))
+
+    # 保存模型
+    save_path = f"{args.save_dir}{args.network}.ckpt"
+    torch.save(model.state_dict(), save_path)
+
+def predict(vocab_size, num_classes, vocab2id):
+    """模型预测"""
+    model = bulid_model(vocab_size, num_classes)
+    save_path = f"{args.save_dir}{args.network}.ckpt"
+    model.load_state_dict(torch.load(save_path))
+    texts = [
+        '这个宾馆比较陈旧了，特价的房间也很一般。总体来说一般',
+        '怀着十分激动的心情放映，可是看着看着发现，在放映完毕后，出现一集米老鼠的动画片！开始还怀疑是不是赠送的个别现象，可是后来发现每张DVD后面都有！'
+        '真不知道生产商怎么想的，我想看的是猫和老鼠，不是米老鼠！如果厂家是想赠送的话，那就全套米老鼠和唐老鸭都赠送，只在每张DVD后面添加一集算什么？？'
+        '简直是画蛇添足！！',
+        '交通方便；环境很好；服务态度很好 房间较小'
+    ]
+    max_len = args.max_len
+    corpus_lists = read_test_data(texts, vocab2id, max_len)
+    batch_sents = torch.tensor(corpus_lists, dtype=torch.int64)
+    scores = model(batch_sents)
+    predic = torch.max(scores.data, 1)[1].numpy()
+    print(predic)
+
 
 if __name__ == '__main__':
     vocab_path = '/home/mesie/python/data/nlp/senta_word_dict.txt'
@@ -196,4 +230,5 @@ if __name__ == '__main__':
 
     train(vocab_size, num_classes, train_corpus_lists, train_label_lists, train_lengths_list,
           dev_corpus_lists, dev_label_lists, dev_lengths_list)
+    # predict(vocab_size, num_classes, vocab2id)
     # print(torch.Tensor(label_lists))
